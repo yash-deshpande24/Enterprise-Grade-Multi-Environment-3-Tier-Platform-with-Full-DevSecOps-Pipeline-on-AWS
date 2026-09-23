@@ -180,4 +180,4 @@ docker-compose up --build
 
 ## Author
 
-Built by [Your Name] — [LinkedIn] | [Portfolio]
+Built by [Yash Deshpande] — [https://www.linkedin.com/in/yash-rajesh-deshpande/]

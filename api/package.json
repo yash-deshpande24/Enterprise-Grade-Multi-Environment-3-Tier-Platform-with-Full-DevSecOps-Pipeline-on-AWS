@@ -1,0 +1,13 @@
+{
+  "name": "3tier-app-api",
+  "version": "1.0.0",
+  "description": "App tier - backend API service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,197 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION      = 'ap-south-1'
+        AWS_ACCOUNT_ID  = credentials('aws-account-id')          // Jenkins credential (secret text)
+        ECR_WEB_REPO    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/myapp-dev-web"
+        ECR_APP_REPO    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/myapp-dev-app"
+        IMAGE_TAG       = "${env.GIT_COMMIT.take(7)}"
+        ECS_CLUSTER     = 'myapp-dev-cluster'
+        ECS_WEB_SERVICE = 'myapp-dev-web-svc'
+        ECS_APP_SERVICE = 'myapp-dev-app-svc'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Unit Tests') {
+            parallel {
+                stage('Web tier') {
+                    steps {
+                        dir('app/web') {
+                            sh 'echo "No unit tests configured for static web tier yet"'
+                        }
+                    }
+                }
+                stage('App tier') {
+                    steps {
+                        dir('app/api') {
+                            sh '''
+                                npm install --omit=dev
+                                npm test
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Code Quality - SonarQube') {
+            steps {
+                withSonarQubeEnv('sonarqube-server') {
+                    sh '''
+                        sonar-scanner \
+                          -Dsonar.projectKey=myapp-3tier \
+                          -Dsonar.sources=app \
+                          -Dsonar.host.url=$SONAR_HOST_URL \
+                          -Dsonar.login=$SONAR_AUTH_TOKEN
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Images') {
+            parallel {
+                stage('Build web image') {
+                    steps {
+                        sh "docker build -t ${ECR_WEB_REPO}:${IMAGE_TAG} -t ${ECR_WEB_REPO}:latest ./app/web"
+                    }
+                }
+                stage('Build app image') {
+                    steps {
+                        sh "docker build -t ${ECR_APP_REPO}:${IMAGE_TAG} -t ${ECR_APP_REPO}:latest ./app/api"
+                    }
+                }
+            }
+        }
+
+        stage('Scan Images - Trivy') {
+            parallel {
+                stage('Scan web image') {
+                    steps {
+                        sh """
+                            trivy image --exit-code 0 --severity HIGH,CRITICAL \
+                              --format table -o trivy-web-report.txt ${ECR_WEB_REPO}:${IMAGE_TAG}
+                        """
+                        archiveArtifacts artifacts: 'trivy-web-report.txt', allowEmptyArchive: true
+                    }
+                }
+                stage('Scan app image') {
+                    steps {
+                        sh """
+                            trivy image --exit-code 0 --severity HIGH,CRITICAL \
+                              --format table -o trivy-app-report.txt ${ECR_APP_REPO}:${IMAGE_TAG}
+                        """
+                        archiveArtifacts artifacts: 'trivy-app-report.txt', allowEmptyArchive: true
+                    }
+                }
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                sh """
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                      docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    docker push ${ECR_WEB_REPO}:${IMAGE_TAG}
+                    docker push ${ECR_WEB_REPO}:latest
+                    docker push ${ECR_APP_REPO}:${IMAGE_TAG}
+                    docker push ${ECR_APP_REPO}:latest
+                """
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                dir('terraform/environments/dev') {
+                    sh '''
+                        terraform init -input=false
+                        terraform plan -input=false -out=tfplan
+                    '''
+                }
+            }
+        }
+
+        stage('Approval Gate') {
+            when { branch 'main' }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: 'Apply Terraform changes and deploy to dev?', ok: 'Deploy'
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when { branch 'main' }
+            steps {
+                dir('terraform/environments/dev') {
+                    sh 'terraform apply -input=false tfplan'
+                }
+            }
+        }
+
+        stage('Deploy to ECS') {
+            when { branch 'main' }
+            steps {
+                sh """
+                    aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_WEB_SERVICE} \
+                      --force-new-deployment --region ${AWS_REGION}
+
+                    aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_APP_SERVICE} \
+                      --force-new-deployment --region ${AWS_REGION}
+
+                    aws ecs wait services-stable --cluster ${ECS_CLUSTER} \
+                      --services ${ECS_WEB_SERVICE} ${ECS_APP_SERVICE} --region ${AWS_REGION}
+                """
+            }
+        }
+
+        stage('Smoke Test') {
+            when { branch 'main' }
+            steps {
+                script {
+                    def albDns = sh(
+                        script: "aws elbv2 describe-load-balancers --names myapp-dev-public-alb --region ${AWS_REGION} --query 'LoadBalancers[0].DNSName' --output text",
+                        returnStdout: true
+                    ).trim()
+                    sh "curl -sf http://${albDns}/ || exit 1"
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                if (env.BRANCH_NAME == 'main') {
+                    echo 'Deployment failed - rolling back ECS services to previous task definition'
+                    sh """
+                        aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_WEB_SERVICE} \
+                          --task-definition myapp-dev-web --region ${AWS_REGION} || true
+                        aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_APP_SERVICE} \
+                          --task-definition myapp-dev-app --region ${AWS_REGION} || true
+                    """
+                }
+            }
+        }
+        always {
+            sh 'docker image prune -f || true'
+        }
+        success {
+            echo "Pipeline succeeded - image tag ${IMAGE_TAG} deployed"
+        }
+    }
+}

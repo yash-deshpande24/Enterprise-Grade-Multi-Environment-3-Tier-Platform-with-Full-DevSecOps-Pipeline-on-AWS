@@ -1,19 +1,25 @@
-version: "3.9"
-
 services:
   web:
-    build: ./app/web
+    build:
+      context: ./app/web
+      dockerfile: Dockerfile
+    container_name: enterprise-web
     ports:
       - "8081:80"
     environment:
-      - APP_API_URL=http://api:8080
+      APP_API_URL: http://api:8080
     depends_on:
       - api
+    restart: unless-stopped
 
   api:
-    build: ./app/api
+    build:
+      context: ./app/api
+      dockerfile: Dockerfile
+    container_name: enterprise-api
     ports:
       - "8080:8080"
     environment:
-      - PORT=8080
-      - NODE_ENV=dev
+      PORT: 8080
+      NODE_ENV: dev
+    restart: unless-stopped

@@ -1,3 +1,13 @@
+// Windows-compatible Jenkinsfile (sh -> bat). Same stages as the original.
+
+// AWS access keys from the Jenkins credential "aws-credentials"
+def AWS_BINDING = [[
+    $class: 'AmazonWebServicesCredentialsBinding',
+    credentialsId: 'aws-credentials',
+    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+]]
+
 pipeline {
     agent any
 
@@ -31,17 +41,15 @@ pipeline {
                 stage('Web tier') {
                     steps {
                         dir('app/web') {
-                            sh 'echo "No unit tests configured for static web tier yet"'
+                            bat 'echo No unit tests configured for static web tier yet'
                         }
                     }
                 }
                 stage('App tier') {
                     steps {
                         dir('app/api') {
-                            sh '''
-                                npm install --omit=dev
-                                npm test
-                            '''
+                            bat 'npm install'
+                            bat 'npm test'
                         }
                     }
                 }
@@ -51,13 +59,7 @@ pipeline {
         stage('Code Quality - SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube-server') {
-                    sh '''
-                        sonar-scanner \
-                          -Dsonar.projectKey=myapp-3tier \
-                          -Dsonar.sources=app \
-                          -Dsonar.host.url=$SONAR_HOST_URL \
-                          -Dsonar.login=$SONAR_AUTH_TOKEN
-                    '''
+                    bat 'call sonar-scanner -Dsonar.projectKey=myapp-3tier -Dsonar.sources=app -Dsonar.host.url=%SONAR_HOST_URL% -Dsonar.login=%SONAR_AUTH_TOKEN%'
                 }
             }
         }
@@ -66,12 +68,12 @@ pipeline {
             parallel {
                 stage('Build web image') {
                     steps {
-                        sh "docker build -t ${ECR_WEB_REPO}:${IMAGE_TAG} -t ${ECR_WEB_REPO}:latest ./app/web"
+                        bat 'docker build -t %ECR_WEB_REPO%:%IMAGE_TAG% -t %ECR_WEB_REPO%:latest ./app/web'
                     }
                 }
                 stage('Build app image') {
                     steps {
-                        sh "docker build -t ${ECR_APP_REPO}:${IMAGE_TAG} -t ${ECR_APP_REPO}:latest ./app/api"
+                        bat 'docker build -t %ECR_APP_REPO%:%IMAGE_TAG% -t %ECR_APP_REPO%:latest ./app/api'
                     }
                 }
             }
@@ -81,19 +83,13 @@ pipeline {
             parallel {
                 stage('Scan web image') {
                     steps {
-                        sh """
-                            trivy image --exit-code 0 --severity HIGH,CRITICAL \
-                              --format table -o trivy-web-report.txt ${ECR_WEB_REPO}:${IMAGE_TAG}
-                        """
+                        bat 'trivy image --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-web-report.txt %ECR_WEB_REPO%:%IMAGE_TAG%'
                         archiveArtifacts artifacts: 'trivy-web-report.txt', allowEmptyArchive: true
                     }
                 }
                 stage('Scan app image') {
                     steps {
-                        sh """
-                            trivy image --exit-code 0 --severity HIGH,CRITICAL \
-                              --format table -o trivy-app-report.txt ${ECR_APP_REPO}:${IMAGE_TAG}
-                        """
+                        bat 'trivy image --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-app-report.txt %ECR_APP_REPO%:%IMAGE_TAG%'
                         archiveArtifacts artifacts: 'trivy-app-report.txt', allowEmptyArchive: true
                     }
                 }
@@ -102,31 +98,33 @@ pipeline {
 
         stage('Push to ECR') {
             steps {
-                sh """
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                      docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-
-                    docker push ${ECR_WEB_REPO}:${IMAGE_TAG}
-                    docker push ${ECR_WEB_REPO}:latest
-                    docker push ${ECR_APP_REPO}:${IMAGE_TAG}
-                    docker push ${ECR_APP_REPO}:latest
-                """
-            }
-        }
-
-        stage('Terraform Plan') {
-            steps {
-                dir('terraform/environments/dev') {
-                    sh '''
-                        terraform init -input=false
-                        terraform plan -input=false -out=tfplan
+                withCredentials(AWS_BINDING) {
+                    bat '''
+                        aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com || exit /b 1
+                        docker push %ECR_WEB_REPO%:%IMAGE_TAG% || exit /b 1
+                        docker push %ECR_WEB_REPO%:latest || exit /b 1
+                        docker push %ECR_APP_REPO%:%IMAGE_TAG% || exit /b 1
+                        docker push %ECR_APP_REPO%:latest || exit /b 1
                     '''
                 }
             }
         }
 
+        stage('Terraform Plan') {
+            steps {
+                withCredentials(AWS_BINDING) {
+                    dir('terraform/environments/dev') {
+                        bat '''
+                            terraform init -input=false || exit /b 1
+                            terraform plan -input=false -out=tfplan || exit /b 1
+                        '''
+                    }
+                }
+            }
+        }
+
         stage('Approval Gate') {
-            when { branch 'main' }
+            when { expression { env.GIT_BRANCH?.endsWith('main') } }
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
                     input message: 'Apply Terraform changes and deploy to dev?', ok: 'Deploy'
@@ -135,39 +133,40 @@ pipeline {
         }
 
         stage('Terraform Apply') {
-            when { branch 'main' }
+            when { expression { env.GIT_BRANCH?.endsWith('main') } }
             steps {
-                dir('terraform/environments/dev') {
-                    sh 'terraform apply -input=false tfplan'
+                withCredentials(AWS_BINDING) {
+                    dir('terraform/environments/dev') {
+                        bat 'terraform apply -input=false tfplan'
+                    }
                 }
             }
         }
 
         stage('Deploy to ECS') {
-            when { branch 'main' }
+            when { expression { env.GIT_BRANCH?.endsWith('main') } }
             steps {
-                sh """
-                    aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_WEB_SERVICE} \
-                      --force-new-deployment --region ${AWS_REGION}
-
-                    aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_APP_SERVICE} \
-                      --force-new-deployment --region ${AWS_REGION}
-
-                    aws ecs wait services-stable --cluster ${ECS_CLUSTER} \
-                      --services ${ECS_WEB_SERVICE} ${ECS_APP_SERVICE} --region ${AWS_REGION}
-                """
+                withCredentials(AWS_BINDING) {
+                    bat '''
+                        aws ecs update-service --cluster %ECS_CLUSTER% --service %ECS_WEB_SERVICE% --force-new-deployment --region %AWS_REGION% || exit /b 1
+                        aws ecs update-service --cluster %ECS_CLUSTER% --service %ECS_APP_SERVICE% --force-new-deployment --region %AWS_REGION% || exit /b 1
+                        aws ecs wait services-stable --cluster %ECS_CLUSTER% --services %ECS_WEB_SERVICE% %ECS_APP_SERVICE% --region %AWS_REGION% || exit /b 1
+                    '''
+                }
             }
         }
 
         stage('Smoke Test') {
-            when { branch 'main' }
+            when { expression { env.GIT_BRANCH?.endsWith('main') } }
             steps {
-                script {
-                    def albDns = sh(
-                        script: "aws elbv2 describe-load-balancers --names myapp-dev-public-alb --region ${AWS_REGION} --query 'LoadBalancers[0].DNSName' --output text",
-                        returnStdout: true
-                    ).trim()
-                    sh "curl -sf http://${albDns}/ || exit 1"
+                withCredentials(AWS_BINDING) {
+                    script {
+                        def albDns = bat(
+                            script: '@aws elbv2 describe-load-balancers --names myapp-dev-public-alb --region %AWS_REGION% --query "LoadBalancers[0].DNSName" --output text',
+                            returnStdout: true
+                        ).trim()
+                        bat "curl -sf http://${albDns}/"
+                    }
                 }
             }
         }
@@ -176,19 +175,19 @@ pipeline {
     post {
         failure {
             script {
-                if (env.BRANCH_NAME == 'main') {
+                if (env.GIT_BRANCH?.endsWith('main')) {
                     echo 'Deployment failed - rolling back ECS services to previous task definition'
-                    sh """
-                        aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_WEB_SERVICE} \
-                          --task-definition myapp-dev-web --region ${AWS_REGION} || true
-                        aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_APP_SERVICE} \
-                          --task-definition myapp-dev-app --region ${AWS_REGION} || true
-                    """
+                    withCredentials(AWS_BINDING) {
+                        bat '''
+                            aws ecs update-service --cluster %ECS_CLUSTER% --service %ECS_WEB_SERVICE% --task-definition myapp-dev-web --region %AWS_REGION% || exit /b 0
+                            aws ecs update-service --cluster %ECS_CLUSTER% --service %ECS_APP_SERVICE% --task-definition myapp-dev-app --region %AWS_REGION% || exit /b 0
+                        '''
+                    }
                 }
             }
         }
         always {
-            sh 'docker image prune -f || true'
+            bat 'docker image prune -f || exit /b 0'
         }
         success {
             echo "Pipeline succeeded - image tag ${IMAGE_TAG} deployed"

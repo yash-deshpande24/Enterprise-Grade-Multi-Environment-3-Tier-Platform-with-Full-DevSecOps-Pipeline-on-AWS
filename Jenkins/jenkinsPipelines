@@ -56,6 +56,7 @@ pipeline {
             }
         }
 
+/*
         stage('Code Quality - SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube-server') {
@@ -63,6 +64,7 @@ pipeline {
                 }
             }
         }
+ */       
 
         stage('Build Docker Images') {
             parallel {

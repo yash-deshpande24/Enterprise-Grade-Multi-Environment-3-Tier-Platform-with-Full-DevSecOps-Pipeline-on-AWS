@@ -64,7 +64,7 @@ pipeline {
                 }
             }
         }
- */       
+*/
 
         stage('Build Docker Images') {
             parallel {
@@ -85,13 +85,13 @@ pipeline {
             parallel {
                 stage('Scan web image') {
                     steps {
-                        bat 'trivy image --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-web-report.txt %ECR_WEB_REPO%:%IMAGE_TAG%'
+                        bat 'trivy image --cache-dir C:/trivy-cache --skip-db-update --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-web-report.txt %ECR_WEB_REPO%:%IMAGE_TAG%'
                         archiveArtifacts artifacts: 'trivy-web-report.txt', allowEmptyArchive: true
                     }
                 }
                 stage('Scan app image') {
                     steps {
-                        bat 'trivy image --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-app-report.txt %ECR_APP_REPO%:%IMAGE_TAG%'
+                        bat 'trivy image --cache-dir C:/trivy-cache --skip-db-update --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-app-report.txt %ECR_APP_REPO%:%IMAGE_TAG%'
                         archiveArtifacts artifacts: 'trivy-app-report.txt', allowEmptyArchive: true
                     }
                 }
@@ -175,19 +175,6 @@ pipeline {
     }
 
     post {
-        failure {
-            script {
-                if (env.GIT_BRANCH?.endsWith('main')) {
-                    echo 'Deployment failed - rolling back ECS services to previous task definition'
-                    withCredentials(AWS_BINDING) {
-                        bat '''
-                            aws ecs update-service --cluster %ECS_CLUSTER% --service %ECS_WEB_SERVICE% --task-definition myapp-dev-web --region %AWS_REGION% || exit /b 0
-                            aws ecs update-service --cluster %ECS_CLUSTER% --service %ECS_APP_SERVICE% --task-definition myapp-dev-app --region %AWS_REGION% || exit /b 0
-                        '''
-                    }
-                }
-            }
-        }
         always {
             bat 'docker image prune -f || exit /b 0'
         }

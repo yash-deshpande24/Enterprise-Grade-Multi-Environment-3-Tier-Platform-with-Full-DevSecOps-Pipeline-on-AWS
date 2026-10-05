@@ -13,8 +13,9 @@ def AWS_BINDING = [[
 pipeline {
     agent any
 
-    environment {
-       AWS_ACCOUNT_ID  = '208805233492'
+   environment {
+        AWS_REGION      = 'ap-south-1'
+        AWS_ACCOUNT_ID  = '208805233492'
         ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         ECR_WEB_REPO    = "${ECR_REGISTRY}/myapp-dev-web"
         ECR_APP_REPO    = "${ECR_REGISTRY}/myapp-dev-app"

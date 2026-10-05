@@ -14,10 +14,10 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION      = 'ap-south-1'
-        AWS_ACCOUNT_ID  = credentials('aws-account-id')          // Jenkins credential (secret text)
-        ECR_WEB_REPO    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/myapp-dev-web"
-        ECR_APP_REPO    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/myapp-dev-app"
+       AWS_ACCOUNT_ID  = '208805233492'
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_WEB_REPO    = "${ECR_REGISTRY}/myapp-dev-web"
+        ECR_APP_REPO    = "${ECR_REGISTRY}/myapp-dev-app"
         IMAGE_TAG       = "${env.GIT_COMMIT.take(7)}"
         ECS_CLUSTER     = 'myapp-dev-cluster'
         ECS_WEB_SERVICE = 'myapp-dev-web-svc'

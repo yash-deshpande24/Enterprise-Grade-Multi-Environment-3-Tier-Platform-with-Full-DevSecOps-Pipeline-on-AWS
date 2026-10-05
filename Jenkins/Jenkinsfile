@@ -15,9 +15,13 @@ pipeline {
 
     environment {
         AWS_REGION      = 'ap-south-1'
-        AWS_ACCOUNT_ID  = credentials('aws-account-id')          // Jenkins credential (secret text)
-        ECR_WEB_REPO    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/myapp-dev-web"
-        ECR_APP_REPO    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/myapp-dev-app"
+        // CHANGED: plain string instead of credentials(...). An account ID is not a secret,
+        // and this removes the "insecure interpolation of sensitive variables" warning.
+        // Replace the value below with your 12-digit AWS account ID.
+        AWS_ACCOUNT_ID  = 'REPLACE_WITH_12_DIGIT_ACCOUNT_ID'
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_WEB_REPO    = "${ECR_REGISTRY}/myapp-dev-web"
+        ECR_APP_REPO    = "${ECR_REGISTRY}/myapp-dev-app"
         IMAGE_TAG       = "${env.GIT_COMMIT.take(7)}"
         ECS_CLUSTER     = 'myapp-dev-cluster'
         ECS_WEB_SERVICE = 'myapp-dev-web-svc'
@@ -28,6 +32,7 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '15'))
+        timeout(time: 30, unit: 'MINUTES')   // NEW: stop hung builds
     }
 
     stages {
@@ -77,6 +82,8 @@ pipeline {
             parallel {
                 stage('Scan web image') {
                     steps {
+                        // To make the build FAIL on critical vulnerabilities, change --exit-code 0 to 1
+                        // and --severity HIGH,CRITICAL to CRITICAL.
                         bat 'trivy image --cache-dir C:/trivy-cache --skip-db-update --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-web-report.txt %ECR_WEB_REPO%:%IMAGE_TAG%'
                         archiveArtifacts artifacts: 'trivy-web-report.txt', allowEmptyArchive: true
                     }
@@ -94,7 +101,7 @@ pipeline {
             steps {
                 withCredentials(AWS_BINDING) {
                     bat '''
-                        aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com || exit /b 1
+                        aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %ECR_REGISTRY% || exit /b 1
                         docker push %ECR_WEB_REPO%:%IMAGE_TAG% || exit /b 1
                         docker push %ECR_WEB_REPO%:latest || exit /b 1
                         docker push %ECR_APP_REPO%:%IMAGE_TAG% || exit /b 1
@@ -126,7 +133,10 @@ pipeline {
                             script: '@aws elbv2 describe-load-balancers --names myapp-dev-public-alb --region %AWS_REGION% --query "LoadBalancers[0].DNSName" --output text',
                             returnStdout: true
                         ).trim()
-                        bat "curl -sf http://${albDns}/"
+                        // CHANGED: retry a few times in case the ALB needs a moment after deploy
+                        retry(3) {
+                            bat "curl -sf http://${albDns}/"
+                        }
                     }
                 }
             }
@@ -139,6 +149,9 @@ pipeline {
         }
         success {
             echo "Pipeline succeeded - image tag ${IMAGE_TAG} deployed"
+        }
+        failure {
+            echo "Pipeline FAILED at tag ${IMAGE_TAG} - check Console Output"
         }
     }
 }

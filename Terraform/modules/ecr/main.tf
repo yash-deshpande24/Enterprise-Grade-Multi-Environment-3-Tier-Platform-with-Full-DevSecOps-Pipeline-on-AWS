@@ -1,6 +1,6 @@
 resource "aws_ecr_repository" "web" {
   name                 = "${var.project_name}-${var.environment}-web"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -13,7 +13,7 @@ resource "aws_ecr_repository" "web" {
 
 resource "aws_ecr_repository" "app" {
   name                 = "${var.project_name}-${var.environment}-app"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
